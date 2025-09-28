@@ -1,0 +1,68 @@
+ODLC 
+Overview:
+The team's Object Detection, Localization, and Classification (ODLC) system is a multi-stage, automated pipeline designed to identify, characterize, and mark the location of specific ground objects. The system's primary function is to detect an airdrop location and analyze objects for their shape, color, and alphanumeric character, determine their exact GPS coordinates, and then trigger an action. The process is sequential and highly automated.
+
+The hardware core of this system consists of:
+    Sensor: A high-resolution camera is crucial. Higher resolution means more pixels on target, allowing for better detection of small details (like letters) from a higher, safer flight altitude.
+    Processor: The Raspberry Pi acts as the mission computer. It runs the custom software, processes the images from the camera, and makes the decisions, separate from the drone's primary flight          controller.
+    Interface: The custom PCB (Printed Circuit Board). It allows the Raspberry Pi to communicate with and control the physical drop mechanism, translating software commands into electrical signals        for the motors.
+The pipeline follows these stages: Capture -> Detect -> Classify -> Localize -> Act.
+
+The localization component is critical for accurately determining the real-world coordinates of a detected object.
+Implementation: The system implements localization by leveraging the drone's known flight data (such as altitude, GPS position, and attitude) in conjunction with the imagery from its onboard camera. By analyzing the object's pixel position within the image frame, the system can calculate its geographic coordinates on the ground.
+
+Implementation: The Field of View (FOV) Equation Method
+This is a geometry-based triangulation approach. Here's a step-by-step breakdown:
+
+Known Parameters:
+    Drone's Own GPS: The drone knows its own latitude, longitude, and altitude with high precision from its onboard GPS and barometer.
+    Camera Parameters: The camera's focal length, sensor size, and image resolution are all pre-calibrated and known. These values define the camera's Field of View (FOV)—how much of the ground it     can see at a specific altitude.
+
+The Process:
+The image is captured. The object is found, and its position in the image is measured in pixels from the center of the frame.
+The system creates a mathematical model. Imagine a cone projecting down from the camera onto the ground; this cone is the camera's FOV. The object's pixel location tells us the specific angle from the center of that cone where the object lies.
+Using trigonometry (the "FOV equation"), the system calculates the ground distance from the point directly beneath the drone (the Nadir point) to the actual object. It does this for both the X (longitude) and Y (latitude) directions.
+
+Simplified Formula: Ground Offset = (Pixel Offset * (2 * Altitude * tan(FOV/2))) / Image Dimension in Pixels
+
+Refinement with Multiple Photos:
+By taking photos from different positions and altitudes, the team can perform a more advanced form of triangulation. Comparing the calculated positions from multiple viewpoints allows the system to cancel out errors and refine the final GPS coordinate, making it much more accurate than a calculation from a single image.
+
+Classification is split into two parallel tasks: determining the color and the letter.
+Determining the Color:
+
+This process uses classic computer vision techniques to be fast and reliable.
+    Blurring: The first step is to apply a Gaussian or Median blur to the image. This smoothens the image and reduces high-frequency noise, tiny color variations, and JPEG artifacts. This results      in a more uniform color region, making the next step more robust.
+    Thresholding: This step segments the image. It converts the image from color (BGR/RGB) into a binary image (pure black and white). For example, to find a red object, the system would look for      a range of pixel values that correspond to "red" and turn all pixels in that range white, and everything else black. This isolates the object from the background and any shadows.
+    Color Detection Model: A simple "model" here could be analyzing the dominant color within the white region (the segmented object) in a different color space like HSV (Hue, Saturation, Value),      which is more intuitive for human color perception and thus more robust to lighting changes than RGB.
+
+Determining the Letter:
+
+This task is more complex due to the need to recognize patterns.
+    Pre-processing: Similar to color detection, the image of the object is pre-processed (grayscaled, blurred, thresholded) to create a clean, high-contrast black-and-white image of the letter.
+    Recognition Technique (using OpenCV):
+    Contour Detection: OpenCV can find the contours (outlines) in the binary image. The external contour would be the shape of the object (e.g., a circle), and an internal contour could be the         letter itself.
+    Template Matching or ML: The system could use template matching, where it compares the isolated letter against a library of pre-defined letter templates. A more advanced approach would be to       use a lightweight Machine Learning model (like one trained on the MNIST dataset for characters) that is loaded onto the Raspberry Pi to classify the letter with higher accuracy, even if it's       distorted or rotated.
+
+The Payload Delivery (Drop) Mechanism
+It is turning a digital decision into a physical action.
+    Actuation: The 5 DC motors likely control 5 separate payload bays (or "buckets") on the carbon fiber table. This allows the drone to carry and independently release multiple payloads for           multiple objects without having to land and reload.
+    Control: The custom PCB is essential here. It contains:
+    Voltage Regulator: To provide stable power from the drone's main battery to the sensitive Raspberry Pi and motors.
+    Motor Drivers: These are chips that can handle the high current required by the DC motors, controlled by the low-power signals from the Raspberry Pi.
+    Release Mechanism: The use of a fishing line shorter than the flight altitude is a simple yet brilliant safety and reliability feature.
+How it works: The motor spools up the fishing line to hold the payload. To release, the motor simply unwinds or releases the line. Because the line is shorter than the altitude, the payload        falls the remaining distance to the ground, and the drone can fly away immediately without the risk of the payload swinging like a pendulum and causing a crash.
+
+Integration: The DroneKit API allows the Python code running on the Raspberry Pi to communicate with the drone's autopilot (e.g., a Pixhawk). The software calculates the target coordinates, uses DroneKit to command the drone to fly to that location, and when the drone's GPS confirms it is over the target, the Raspberry Pi sends a signal via the custom PCB to trigger the specific motor and release the payload.
+
+Another way of detection :The imaging and ODLC system's ability to detect emergent objects relies on a robust machine-learning model. The team developed a custom dataset by extensively photographing a specialized manikin from numerous viewpoints. This dataset was then used to train a YOLOv8 object detection algorithm. The key to the model's success is the diversity of the training data; by exposing the model to the object from many angles, it learns to recognize it reliably under varying conditions, ensuring high accuracy and the ability to adapt to novel scenarios in the field.
+
+
+University College London | SUAS 2023 
+Summary of how they set up the communication infrastructure between the UAV and the ground control station:
+Two telemetry and radio systems were utilized for air-ground communications:
+1. The first system uses RFD900 radios operating at 900 MHz, enabling wireless communication between the UAV and the ground control station at distances of up to 40 kilometers. Data transfer over this link is managed by the MAVLink protocol, which is a lightweight messaging protocol.
+2. The second system is the Herelink ecosystem, which consists of an air unit and a controller. The Herelink air unit includes an RC receiver for manual flight control, and it can simultaneously communicate with the controller via MAVLink. This allows the controller to act as a backup ground control station, ensuring reliable command and telemetry even if the primary link fails.
+Additionally, the team did not rely on a Wi-Fi link for their UAV communication; instead, they used dedicated radio telemetry and RC control systems that surpass the range and reliability limits of standard Wi-Fi. 
+The UAV was equipped with an NVIDIA Jetson computer mounted on its underside, responsible for executing imaging algorithms such as object detection, classification, and localization. Wireless data transfer between the Jetson onboard computer and the Ground Control Station (GCS) was achieved using both the RFD900 radio telemetry system and the Herelink air unit, ensuring robust and redundant connections for mission operations.
+
