@@ -1,3 +1,4 @@
+from turkish university 
 ODLC 
 Overview:
 The team's Object Detection, Localization, and Classification (ODLC) system is a multi-stage, automated pipeline designed to identify, characterize, and mark the location of specific ground objects. The system's primary function is to detect an airdrop location and analyze objects for their shape, color, and alphanumeric character, determine their exact GPS coordinates, and then trigger an action. The process is sequential and highly automated.
