@@ -1,0 +1,318 @@
+from _future_ import annotations
+import math
+import threading
+import time
+import dronekit_sitl
+import matplotlib.pyplot as plt
+import numpy as np
+import utm
+from dronekit import Command, LocationGlobalRelative, VehicleMode, connect
+from matplotlib.animation import FuncAnimation
+from pymavlink import mavutil
+
+waypoints = [
+    (-35.3252973, 149.2462850, 30),           
+    (-35.3252973, 149.2495930, 30),          
+    (-35.3235007, 149.2495930, 30),       
+    (-35.3235007, 149.2462850, 30),         
+    (-35.3252973, 149.2462850, 30),            
+]
+obstacles = [
+    (-35.3252973, 149.2473877, 3, 30),   
+    (-35.3243990, 149.2495930, 4, 30),   
+    (-35.3235007, 149.2484903, 5, 30),  
+]
+
+def get_distance_meters(loc1: LocationGlobalRelative, loc2: LocationGlobalRelative) -> float:
+    R = 6_371_000  
+    lat1_rad = math.radians(loc1.lat)
+    lat2_rad = math.radians(loc2.lat)
+    dlat = math.radians(loc2.lat - loc1.lat)
+    dlon = math.radians(loc2.lon - loc1.lon)
+
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(lat1_rad) * math.cos(lat2_rad) * math.sin(dlon / 2) ** 2
+    )
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return R * c
+
+def clamp(val: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, val))
+def generate_bypass(
+    current_loc: LocationGlobalRelative,
+    waypoint_direction: tuple[float, float],
+    obstacle: tuple[float, float, float, float],
+) -> LocationGlobalRelative | None:
+    obs_lat, obs_lon, radius_m, _ = obstacle
+
+    lateral_offset = 5  # lateral offset from the obstacle
+    bypass_lat = current_loc.lat
+    bypass_lon = current_loc.lon
+    angle_to_obstacle = math.atan2(obs_lat - current_loc.lat, obs_lon - current_loc.lon)    
+    bypass_lat += lateral_offset * math.sin(angle_to_obstacle + math.pi / 2) / 111320 #offset lat
+    bypass_lon += lateral_offset * math.cos(angle_to_obstacle + math.pi / 2) / (111320 * math.cos(math.radians(current_loc.lat)))  #offset long
+
+    print(f"   📍 Diverting sideways around obstacle to: ({bypass_lat:.7f}, {bypass_lon:.7f})")
+    
+    return LocationGlobalRelative(bypass_lat, bypass_lon, current_loc.alt)
+
+last_obstacle_avoided: int | None = None
+avoidance_time: float = 0.0
+
+def check_for_obstacles(vehicle):
+    global last_obstacle_avoided, avoidance_time
+
+    current_loc = vehicle.location.global_relative_frame
+    next_index = vehicle.commands.next
+
+    if next_index >= vehicle.commands.count:
+        return None
+
+    next_cmd = vehicle.commands[next_index]
+    if next_cmd.command != mavutil.mavlink.MAV_CMD_NAV_WAYPOINT:
+        return None
+
+    waypoint_direction = (next_cmd.x, next_cmd.y)
+
+    if hasattr(vehicle, "velocity") and vehicle.velocity:
+        vel_north = vehicle.velocity[0]
+        vel_east = vehicle.velocity[1]
+        speed = math.hypot(vel_north, vel_east)
+        if speed > 0.4:
+            pred_lat = current_loc.lat + (vel_north * 0.8) / 111320
+            pred_lon = current_loc.lon + (vel_east * 0.8) / (111320 * math.cos(math.radians(current_loc.lat)))
+            predicted_loc = LocationGlobalRelative(pred_lat, pred_lon, current_loc.alt)
+        else:
+            predicted_loc = current_loc
+    else:
+        predicted_loc = current_loc
+    for index, obstacle in enumerate(obstacles):
+        olat, olon, radius, _ = obstacle
+        obs_loc = LocationGlobalRelative(olat, olon, current_loc.alt)
+        dist_current = get_distance_meters(current_loc, obs_loc)
+        dist_predicted = get_distance_meters(predicted_loc, obs_loc)
+        dist = min(dist_current, dist_predicted)
+        if index == 0:
+            obs2_dist = get_distance_meters(
+                current_loc,
+                LocationGlobalRelative(obstacles[1][0], obstacles[1][1], current_loc.alt),
+            )
+            obs3_dist = get_distance_meters(
+                current_loc,
+                LocationGlobalRelative(obstacles[2][0], obstacles[2][1], current_loc.alt),
+            )
+            print(f"   📊 Distances - Obs1: {dist_current:.1f} m, Obs2: {obs2_dist:.1f} m, Obs3: {obs3_dist:.1f} m")
+        detection_range = radius + (6 if index in (1, 2) else 5)
+        if dist < detection_range:
+            now = time.time()
+            if (last_obstacle_avoided != index) or (now - avoidance_time > 6):
+                print(f"⚠  Obstacle {index + 1} detected at {dist:.1f} m → generating bypass")
+                bypass = generate_bypass(current_loc, waypoint_direction, obstacle)
+                if bypass:
+                    return bypass, index
+    return None
+
+def upload_mission(vehicle, mission_waypoints):
+    cmds = vehicle.commands
+    cmds.clear()
+    takeoff_cmd = Command(
+        0,0,0,
+        mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
+        mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+        0,0,0,0,0,0,0,0,altitude,
+    )
+    cmds.add(takeoff_cmd)
+
+    for lat, lon, alt in mission_waypoints:
+        cmd = Command(
+            0,0,0,
+            mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT,
+            mavutil.mavlink.MAV_CMD_NAV_WAYPOINT,
+            0,0,0,0,0,0,lat,lon,alt,
+        )
+        cmds.add(cmd)
+    cmds.upload()
+    print("✅ Mission uploaded")
+
+def arm_and_takeoff(target_altitude: float):
+    print("🚁 Pre-arm checks")
+    while not vehicle.is_armable:
+        print("⏳ Waiting for vehicle to initialize...")
+        time.sleep(1)
+    print("🚁 Arming motors")
+    vehicle.mode = VehicleMode("GUIDED")
+    vehicle.armed = True
+
+    while not vehicle.armed:
+        print("⏳ Waiting for arming...")
+        time.sleep(1)
+    print(f"⬆ Taking off to {target_altitude} m")
+    vehicle.simple_takeoff(target_altitude)
+    while True:
+        alt = vehicle.location.global_relative_frame.alt
+        print(f"   Altitude: {alt:.1f} m")
+        if alt >= target_altitude * 0.95:
+            print("✅ Reached target altitude")
+            break
+        time.sleep(1)
+
+drone_path: list[tuple[float, float]] = []
+def run_auto_mission():
+    global last_obstacle_avoided, avoidance_time
+    print("🚀 Running AUTO mission")
+    time.sleep(5)
+
+    while True:
+        next_wp = vehicle.commands.next
+        total_wp = vehicle.commands.count
+        loc = vehicle.location.global_relative_frame
+        drone_path.append((loc.lat, loc.lon))
+        print(f"➡ Next WP: {next_wp}/{total_wp - 1} - Position: {loc.lat:.7f}, {loc.lon:.7f}")
+        if next_wp >= total_wp:
+            print("✅ Final waypoint reached")
+            break
+        result = check_for_obstacles(vehicle)
+        if result:
+            bypass, index = result
+            last_obstacle_avoided = index
+            avoidance_time = time.time()
+            print("🔄 Executing diversion")
+            vehicle.mode = VehicleMode("GUIDED")
+            vehicle.simple_goto(bypass, groundspeed=7)
+            start_wait = time.time()
+            while (
+                get_distance_meters(vehicle.location.global_relative_frame, bypass) > 3
+                and time.time() - start_wait < 12
+            ):
+                time.sleep(0.3)
+            print("↩ Returning to AUTO")
+            vehicle.mode = VehicleMode("AUTO")
+            vehicle.commands.next = next_wp
+            vehicle.flush()
+            continue
+        time.sleep(0.2)
+def save_path_data():
+    if not drone_path:
+        return
+    with open("drone_path_data.txt", "w") as f:
+        f.write("Latitude,Longitude\n")
+        for lat, lon in drone_path:
+            f.write(f"{lat:.7f},{lon:.7f}\n")
+
+def calculate_relative_coordinates(reference_lat, reference_lon, points):
+    rel_points = []
+    ref_e, ref_n, zone, letter = utm.from_latlon(reference_lat, reference_lon)
+    for lat, lon in points:
+        easting, northing, _, _ = utm.from_latlon(lat, lon)
+        rel_points.append((easting - ref_e, northing - ref_n))
+    return rel_points
+
+plt.rcParams["figure.figsize"] = [10, 8]
+fig, ax = plt.subplots()
+reference_lat, reference_lon, _ = waypoints[0]
+wp_relative = calculate_relative_coordinates(
+    reference_lat, reference_lon, [(lat, lon) for lat, lon, _ in waypoints]
+)
+wp_x, wp_y = zip(*wp_relative)
+obs_relative = calculate_relative_coordinates(
+    reference_lat, reference_lon, [(lat, lon) for lat, lon, _, _ in obstacles]
+)
+
+all_x = list(wp_x) + [x for x, _ in obs_relative]
+all_y = list(wp_y) + [y for _, y in obs_relative]
+margin = 20
+ax.set_xlim(min(all_x) - margin, max(all_x) + margin)
+ax.set_ylim(min(all_y) - margin, max(all_y) + margin)
+
+ax.plot(wp_x, wp_y, "bo-", linewidth=3, markersize=10, label="Planned Path", alpha=0.8)
+for i, (x, y) in enumerate(zip(wp_x, wp_y)):
+    ax.annotate(
+        f"WP{i+1}",
+        (x, y),
+        xytext=(8, 8),
+        textcoords="offset points",
+        fontsize=10,
+        fontweight="bold",
+        bbox=dict(boxstyle="round,pad=0.3", facecolor="lightblue", alpha=0.7),
+    )
+for i, ((ox, oy), obstacle) in enumerate(zip(obs_relative, obstacles)):
+    radius = obstacle[2]
+    circle = plt.Circle((ox, oy), radius, color="red", alpha=0.5, label="Obstacle" if i == 0 else "")
+    ax.add_patch(circle)
+    ax.plot(ox, oy, "rx", markersize=10, markeredgewidth=2)
+    ax.annotate(f"Obs{i+1}", (ox, oy), xytext=(5, 5), textcoords="offset points")
+
+drone_plot, = ax.plot([], [], "g-", linewidth=4, label="Actual Path", alpha=0.9)
+current_pos, = ax.plot([], [], "ro", markersize=12, label="Current Position", markeredgecolor="darkred", markeredgewidth=2)
+
+ax.set_aspect("equal")
+ax.grid(True, alpha=0.3)
+ax.set_xlabel("East-West Distance (meters)")
+ax.set_ylabel("North-South Distance (meters)")
+ax.legend()
+ax.set_title("Drone Mission – Relative Coordinates from WP1")
+
+def update_plot(frame):
+    if not drone_path:
+        return drone_plot, current_pos
+    rel_path = calculate_relative_coordinates(reference_lat, reference_lon, drone_path)
+    xs, ys = zip(*rel_path)
+    drone_plot.set_data(xs, ys)
+    current_pos.set_data(xs[-1], ys[-1])
+    if frame % 10 == 0:
+        print(
+            f"📍 Current position: ({drone_path[-1][0]:.7f}, {drone_path[-1][1]:.7f}) → "
+            f"({xs[-1]:.1f} m East, {ys[-1]:.1f} m North)"
+        )
+    return drone_plot, current_pos
+ani = FuncAnimation(fig, update_plot, interval=2000, blit=True, cache_frame_data=False)
+
+def print_waypoint_info():
+    print("\n=== Waypoint Analysis ===")
+    for i, (lat, lon, alt) in enumerate(waypoints):
+        print(f"WP{i+1}: ({lat:.7f}, {lon:.7f}, {alt} m)")
+    total = 0.0
+    for i in range(len(waypoints) - 1):
+        loc1 = LocationGlobalRelative(*waypoints[i])
+        loc2 = LocationGlobalRelative(*waypoints[i + 1])
+        dist = get_distance_meters(loc1, loc2)
+        total += dist
+        print(f"WP{i+1} → WP{i+2}: {dist:.1f} m")
+    print(f"Total route length: {total:.1f} m\n")
+def print_obstacle_info():
+    print("=== Obstacle Analysis ===")
+    for i, (lat, lon, radius, height) in enumerate(obstacles):
+        print(f"Obs{i+1}: ({lat:.7f}, {lon:.7f}), radius={radius} m, height={height} m")
+    print("")
+
+print_waypoint_info()
+print_obstacle_info()
+
+print("\n=== Starting SITL ===")
+sitl = dronekit_sitl.start_default()
+connection_string = "udp:127.0.0.1:14550"
+print(f"🔗 Connecting to vehicle at {connection_string}")
+vehicle = connect(connection_string, wait_ready=True)
+vehicle.groundspeed = 6
+
+print("\n=== Mission Start ===")
+upload_mission(vehicle, waypoints)
+arm_and_takeoff(altitude)
+print("🚀 Switching to AUTO mode")
+vehicle.mode = VehicleMode("AUTO")
+mission_thread = threading.Thread(target=run_auto_mission, daemon=True)
+mission_thread.start()
+
+print("📊 Launching live plot…")
+try:
+    plt.show(block=True)
+except KeyboardInterrupt:
+    print("Plot window closed")
+mission_thread.join(timeout=300)
+print("\n🎉 Mission complete → RTL")
+vehicle.mode = VehicleMode("RTL")
+time.sleep(10)
+vehicle.close()
+sitl.stop()
+print("=== Mission Finished ===")
