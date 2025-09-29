@@ -1,0 +1,31 @@
+Autonomous Drone Mission with Obstacle Avoidance System
+ 1. Introduction and System Overview
+
+This autonomous drone system implements a complete solution for UAV navigation with real-time obstacle avoidance using DroneKit-Python API. 
+The architecture integrates four key modules: Mission Planning for waypoint definition, Obstacle Detection using predictive analytics,
+Avoidance for dynamic bypass maneuvers, and Visualization for real-time monitoring. Built on MAVLink protocol and SITL simulation, 
+the system provides a robust platform for autonomous navigation in obstacle-rich environments.
+
+2. Mission Configuration and Core Algorithms
+
+The mission follows a rectangular survey pattern with five waypoints at 30-meter altitude, 
+covering approximately 300×200 meters. Three cylindrical obstacles (3-5m radius) are strategically placed along the route. 
+The system employs Haversine formula for precise distance calculations and predictive detection that forecasts drone position 0.8 seconds ahead using velocity vectors.
+When obstacles are detected within safety margins, the system generates lateral bypass waypoints 5 meters perpendicular to the threat vector.
+
+3. Control Logic and Mission Execution
+Intelligent mode switching between AUTO and GUIDED modes ensures seamless obstacle avoidance.
+During normal operation, the drone follows waypoints in AUTO mode, transitioning to GUIDED mode for bypass maneuvers at 7 m/s before resuming mission progress. 
+A 6-second cooldown mechanism prevents oscillation around obstacles. The mission workflow includes SITL initialization, automated takeoff, 
+continuous 5Hz obstacle monitoring, and Return-to-Launch upon completion.
+
+4. Visualization and Performance
+
+The real-time visualization system displays planned paths, actual trajectories, obstacles, and current position using UTM coordinate transformation.
+Performance metrics include 8-11 meter detection ranges, 6 m/s cruise speed, 7 m/s avoidance speed, and 5Hz monitoring frequency. 
+Safety features incorporate predictive avoidance, multi-position checking, and conservative safety margins.
+
+5. Conclusion
+This system demonstrates reliable autonomous navigation through integrated obstacle avoidance algorithms and dynamic path planning.
+The modular architecture supports easy expansion with additional sensors or advanced algorithms, 
+providing a foundation for real-world applications in survey and inspection missions where dynamic obstacle avoidance is critical for operational safety and success.
